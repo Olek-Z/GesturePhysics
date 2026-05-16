@@ -25,7 +25,7 @@ My role was less about writing syntax and more about:
 - Identifying where generated code was inefficient or incorrect and prompting targeted fixes
 - Evaluating outputs critically and iterating
 
-The split was roughly **35% me, 65% AI-generated** — but the 35% was the part that mattered: knowing what to ask for, how to structure each request, catching what was wrong, and understanding the output well enough to direct the next step.
+The split was roughly **35% me, 65% AI-generated**, the 35% was the part that mattered: knowing what to ask for, how to structure each request, catching what was wrong, and understanding the output well enough to direct the next step.
 
 ---
 
