@@ -8,6 +8,7 @@ from time import perf_counter
 from mediapipe.python.solutions import hands as mp_hands
 
 # --- INITIALIZATION ---
+# Set up MediaPipe hand tracking (up to 2 hands) and open webcam feed
 hands = mp_hands.Hands(
     max_num_hands=2,
     min_detection_confidence=0.7,
@@ -15,22 +16,27 @@ hands = mp_hands.Hands(
 )
 cap = cv2.VideoCapture(0)
 
-# --- PHYSICS SETTINGS ---
+# --- PHYSICS CONSTANTS ---
+# Controls how boxes behave in the simulation
 GRAVITY = 1.2
-BOUNCE = -0.3
 FLOOR_Y = 380
 box_size = 70
-PINCH_THRESHOLD = 0.035
-GRAB_MARGIN = 18
-SHATTER_SPEED = 28
-FRAGMENT_LIFETIME = 1.0
-THROW_SCALE = 0.04
-MAX_THROW_SPEED = 35
+PINCH_THRESHOLD = 0.035   # Normalized distance between thumb and index to register a pinch
+GRAB_MARGIN = 18           # Pixel buffer around box edges for grab detection
+SHATTER_SPEED = 28         # Minimum impact speed to shatter glass
+FRAGMENT_LIFETIME = 1.0    # Seconds before shatter fragments disappear
+THROW_SCALE = 0.04         # Scales hand velocity into throw force
+MAX_THROW_SPEED = 35       # Caps throw velocity so boxes don't fly off screen
+
+# Palm and fingertip landmark IDs used for skeleton rendering
 PALM_CONNECTIONS = {
     (0, 1), (0, 5), (0, 9), (0, 13), (0, 17),
     (5, 9), (9, 13), (13, 17)
 }
 FINGERTIPS = {4, 8, 12, 16, 20}
+
+# --- MATERIALS ---
+# Each material has unique gravity and bounce behavior
 materials = [
     {"name": "glass", "color": (210, 235, 255), "gravity": 1.0, "bounce": -0.2},
     {"name": "rubber", "color": (80, 230, 120), "gravity": 1.2, "bounce": -0.85},
@@ -38,6 +44,7 @@ materials = [
 ]
 
 # --- BOX SETUP ---
+# Spawn one box per material with placeholder positions (corrected on first frame)
 boxes = []
 num_boxes = 3
 spawn_positions_ready = False
@@ -60,12 +67,13 @@ for i in range(num_boxes):
         "active": True
     })
 
-# --- GRAB LOGGING ---
-grab_events = []
-fragments = []
+# --- SESSION LOGGING ---
+grab_events = []  # Stores grab data for end-of-session analytics
+fragments = []    # Active glass shatter particles
 
 
 def set_spawn_positions(screen_width):
+    # Called once on the first frame when screen width is known
     spacing = screen_width // (num_boxes + 1)
     for i, box in enumerate(boxes):
         start_x = spacing * (i + 1) - box_size // 2
@@ -75,6 +83,7 @@ def set_spawn_positions(screen_width):
 
 
 def finish_grab(box, apply_throw=True):
+    # Logs the grab event and optionally applies throw velocity on release
     if box["grab_started_at"] is None:
         return
 
@@ -97,6 +106,7 @@ def finish_grab(box, apply_throw=True):
 
 
 def show_grab_chart():
+    # Prints grab log to console and displays bar chart of grab counts per box
     if not grab_events:
         print("No grab events were recorded.")
         return
@@ -120,6 +130,7 @@ def show_grab_chart():
 
 
 def reset_boxes():
+    # Resets all boxes to starting positions and clears fragments
     fragments.clear()
     for box in boxes:
         finish_grab(box, apply_throw=False)
@@ -137,6 +148,7 @@ def reset_boxes():
 
 
 def shatter_box(box):
+    # Deactivates the box and spawns a 3x3 grid of fading fragments
     finish_grab(box, apply_throw=False)
     box["active"] = False
     box["is_grabbing"] = False
@@ -160,6 +172,7 @@ def shatter_box(box):
             })
 
 
+# --- MAIN LOOP ---
 while cap.isOpened():
     success, img = cap.read()
     if not success: break
@@ -168,6 +181,7 @@ while cap.isOpened():
     h, w, c = img.shape
     display = np.zeros((h, w, 3), dtype=np.uint8)
 
+    # Set spawn positions once on first frame when screen width is available
     if not spawn_positions_ready:
         set_spawn_positions(w)
         spawn_positions_ready = True
@@ -178,7 +192,7 @@ while cap.isOpened():
     active_fingers = set()
     detected_hands = set()
 
-    # 1. HAND PROCESSING & INTERACTION
+    # 1. HAND TRACKING & INTERACTION
     if results.multi_hand_landmarks:
         for hand_lms, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
             hand_label = handedness.classification[0].label
@@ -186,18 +200,20 @@ while cap.isOpened():
             lms = hand_lms.landmark
             ix, iy = int(lms[8].x * w), int(lms[8].y * h)
 
-            # Pinch Check
+            # Pinch detection — measure normalized distance between thumb tip and index tip
             dist = math.sqrt((lms[4].x - lms[8].x) ** 2 + (lms[4].y - lms[8].y) ** 2)
 
             if dist < PINCH_THRESHOLD:
                 active_fingers.add(hand_label)
 
+                # Check if this hand is already holding a box
                 held_box = None
                 for box in boxes:
                     if box["active"] and box["grabbed_by"] == hand_label:
                         held_box = box
                         break
 
+                # If not, try to grab the topmost box under the pinch point
                 if held_box is None:
                     for box in reversed(boxes):
                         if box["active"] and box["grabbed_by"] is None and \
@@ -216,6 +232,7 @@ while cap.isOpened():
                         held_box["release_velocity"] = [0, 0]
                         held_box["dropped_by_user"] = False
 
+                    # Track hand velocity each frame to calculate throw force on release
                     if held_box["hand_prev_pos"] is not None and held_box["hand_prev_time"] is not None:
                         dt = max(now - held_box["hand_prev_time"], 0.001)
                         vx = (ix - held_box["hand_prev_pos"][0]) / dt * THROW_SCALE
@@ -233,16 +250,17 @@ while cap.isOpened():
                     held_box["pos"][0] = ix - box_size // 2
                     held_box["pos"][1] = iy - box_size // 2
 
-                    # Z-Layering: Move grabbed box to end of list
+                    # Z-layering — move grabbed box to end of list so it renders on top
                     if boxes[-1] is not held_box:
                         boxes.remove(held_box)
                         boxes.append(held_box)
             else:
+                # Pinch released — finish grab and apply throw
                 for box in boxes:
                     if box["active"] and box["grabbed_by"] == hand_label:
                         finish_grab(box)
 
-            # Draw Hand Skeleton
+            # Draw hand skeleton — yellow if pinching, white otherwise
             hand_color = (0, 255, 255) if hand_label in active_fingers else (255, 255, 255)
             for connection in mp_hands.HAND_CONNECTIONS:
                 start = int(connection[0])
@@ -257,11 +275,12 @@ while cap.isOpened():
                 radius = 6 if landmark_id in FINGERTIPS else 3
                 cv2.circle(display, point, radius, hand_color, cv2.FILLED)
 
+    # Release any box whose hand left the frame
     for box in boxes:
         if box["active"] and box["grabbed_by"] is not None and box["grabbed_by"] not in detected_hands:
             finish_grab(box)
 
-    # 2. PHYSICS & SOLID COLLISION RESOLUTION
+    # 2. PHYSICS & COLLISION
     cv2.line(display, (0, FLOOR_Y + box_size), (w, FLOOR_Y + box_size), (70, 70, 70), 1)
 
     for i, box in enumerate(boxes):
@@ -269,11 +288,12 @@ while cap.isOpened():
             continue
 
         if not box["is_grabbing"]:
-            # Apply Gravity
+            # Apply gravity and move box
             box["vel"][1] += box["material"]["gravity"]
             box["pos"][0] += int(box["vel"][0])
             box["pos"][1] += int(box["vel"][1])
 
+            # Wall collision
             if box["pos"][0] < 0:
                 box["pos"][0] = 0
                 box["vel"][0] *= -0.4
@@ -281,28 +301,27 @@ while cap.isOpened():
                 box["pos"][0] = w - box_size
                 box["vel"][0] *= -0.4
 
-            # BOX vs BOX SOLID COLLISION
+            # Box vs box AABB collision
             for j, other in enumerate(boxes):
                 if i == j: continue
                 if not other["active"]: continue
 
-                # AABB Collision Detection
                 if (box["pos"][0] < other["pos"][0] + box_size and
                         box["pos"][0] + box_size > other["pos"][0] and
                         box["pos"][1] < other["pos"][1] + box_size and
                         box["pos"][1] + box_size > other["pos"][1]):
 
-                    # Resolve Vertical (Stacking)
-                    if box["pos"][1] < other["pos"][1]:  # Coming from above
+                    # Vertical resolution — stack boxes on top of each other
+                    if box["pos"][1] < other["pos"][1]:
                         box["pos"][1] = other["pos"][1] - box_size
                         box["vel"][1] *= box["material"]["bounce"]
                         box["vel"][0] *= 0.96
                         if abs(box["vel"][1]) < 2: box["vel"][1] = 0
-                    else:  # Coming from below or side-shuffle
+                    else:
                         box["pos"][1] = other["pos"][1] + box_size
-                        box["vel"][1] = 1  # Push down slightly
+                        box["vel"][1] = 1
 
-            # Floor Collision
+            # Floor collision — glass shatters if thrown hard enough
             if box["pos"][1] > FLOOR_Y:
                 impact_speed = box["vel"][1]
                 if box["material"]["name"] == "glass" and box["dropped_by_user"] and impact_speed > SHATTER_SPEED:
@@ -315,6 +334,8 @@ while cap.isOpened():
                 if abs(box["vel"][1]) < 1.5: box["vel"][1] = 0
                 if abs(box["vel"][0]) < 0.2: box["vel"][0] = 0
 
+    # 3. FRAGMENT PARTICLE SYSTEM
+    # Update and render each shard, removing expired ones
     now = perf_counter()
     for fragment in fragments[:]:
         age = now - fragment["created_at"]
@@ -332,7 +353,7 @@ while cap.isOpened():
         size = fragment["size"]
         cv2.rectangle(display, (x, y), (x + size, y + size), color, cv2.FILLED)
 
-    # 3. RENDER ALL BOXES
+    # 4. RENDER BOXES
     for box in boxes:
         if not box["active"]:
             continue
@@ -358,7 +379,7 @@ while cap.isOpened():
         cv2.putText(display, material_label, (material_x, material_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (20, 20, 20), 1)
 
-    # UI
+    # 5. UI OVERLAY
     pinch_status = "Pinching: " + ", ".join(sorted(active_fingers)) if active_fingers else "Pinching: None"
     cv2.putText(display, "Physics Sandbox", (20, 36),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (245, 245, 245), 2)
@@ -372,6 +393,8 @@ while cap.isOpened():
     if key == ord('r'):
         reset_boxes()
 
+# --- CLEANUP ---
+# Finalize any active grabs and release resources
 for box in boxes:
     finish_grab(box)
 
